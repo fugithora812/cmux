@@ -1144,6 +1144,9 @@ final class BrowserPanel: Panel, ObservableObject {
         // Enable JavaScript
         config.defaultWebpagePreferences.allowsContentJavaScript = true
 
+        // Allow window.open() so OAuth popups (e.g. Notion, Google) can function
+        config.preferences.javaScriptCanOpenWindowsAutomatically = true
+
         // Set up web view
         let webView = CmuxWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true
@@ -2331,7 +2334,8 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         let nsError = error as NSError
-        NSLog("BrowserPanel provisional navigation failed: %@", error.localizedDescription)
+        NSLog("BrowserPanel provisional navigation failed: domain=%@ code=%d desc=%@",
+              nsError.domain, nsError.code, error.localizedDescription)
 
         // Cancelled navigations (e.g. rapid typing) are not real errors.
         if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
@@ -2543,11 +2547,114 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
     }
 }
 
+// MARK: - OAuth Popup Window Controller
+
+/// Lightweight popup window for OAuth flows (e.g. Notion, Google).
+/// Uses the WebKit-provided configuration to preserve `window.opener` references,
+/// which is essential for `postMessage`-based token handoff.
+private class OAuthPopupWindowController: NSObject, WKUIDelegate, WKNavigationDelegate {
+    let webView: WKWebView
+    private let panel: NSPanel
+    private var onClose: (() -> Void)?
+    private var closeObserver: NSObjectProtocol?
+
+    init(configuration: WKWebViewConfiguration, windowFeatures: WKWindowFeatures) {
+        let width = windowFeatures.width?.doubleValue ?? 500
+        let height = windowFeatures.height?.doubleValue ?? 700
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+
+        panel = NSPanel(
+            contentRect: rect,
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isReleasedWhenClosed = false
+        panel.center()
+
+        // Use the WebKit-provided configuration to preserve window.opener
+        webView = WKWebView(frame: rect, configuration: configuration)
+        webView.customUserAgent = BrowserUserAgentSettings.safariUserAgent
+
+        super.init()
+
+        webView.uiDelegate = self
+        webView.navigationDelegate = self
+        panel.contentView = webView
+    }
+
+    func show(onClose: @escaping () -> Void) {
+        self.onClose = onClose
+        closeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: panel,
+            queue: .main
+        ) { [weak self] _ in
+            self?.cleanup()
+        }
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    private func cleanup() {
+        if let observer = closeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            closeObserver = nil
+        }
+        onClose?()
+        onClose = nil
+    }
+
+    // MARK: WKUIDelegate
+
+    /// JS `window.close()` — auto-close the popup panel
+    func webViewDidClose(_ webView: WKWebView) {
+        panel.close()
+    }
+
+    /// Nested popups from within the popup — load in-place to prevent recursive windows
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        if let url = navigationAction.request.url {
+            webView.load(URLRequest(url: url))
+        }
+        return nil
+    }
+
+    // MARK: WKNavigationDelegate
+
+    /// Handle custom URL schemes (e.g. `notion://`) by opening externally
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        if let url = navigationAction.request.url,
+           let scheme = url.scheme,
+           !["http", "https", "about", "blob", "data"].contains(scheme) {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    deinit {
+        if let observer = closeObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+}
+
 // MARK: - UI Delegate
 
 private class BrowserUIDelegate: NSObject, WKUIDelegate {
     var openInNewTab: ((URL) -> Void)?
     var requestNavigation: ((URLRequest, BrowserInsecureHTTPNavigationIntent) -> Void)?
+    private var popupController: OAuthPopupWindowController?
 
     private func javaScriptDialogTitle(for webView: WKWebView) -> String {
         if let absolute = webView.url?.absoluteString, !absolute.isEmpty {
@@ -2568,26 +2675,33 @@ private class BrowserUIDelegate: NSObject, WKUIDelegate {
         completion(alert.runModal())
     }
 
-    /// Returning nil tells WebKit not to open a new window.
-    /// Cmd+click opens in a new tab; regular target=_blank navigates in-place.
+    /// Cmd+click opens in a new tab; window.open() opens an OAuth popup panel.
     func webView(
         _ webView: WKWebView,
         createWebViewWith configuration: WKWebViewConfiguration,
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        if let url = navigationAction.request.url {
+        // Cmd+click: open in a new tab (preserve existing behavior)
+        if navigationAction.modifierFlags.contains(.command),
+           let url = navigationAction.request.url {
             if let requestNavigation {
-                let intent: BrowserInsecureHTTPNavigationIntent =
-                    navigationAction.modifierFlags.contains(.command) ? .newTab : .currentTab
-                requestNavigation(navigationAction.request, intent)
-            } else if navigationAction.modifierFlags.contains(.command) {
-                openInNewTab?(url)
+                requestNavigation(navigationAction.request, .newTab)
             } else {
-                webView.load(navigationAction.request)
+                openInNewTab?(url)
             }
+            return nil
         }
-        return nil
+
+        // window.open() — create a real popup so window.opener is preserved
+        popupController = nil
+        let controller = OAuthPopupWindowController(
+            configuration: configuration,
+            windowFeatures: windowFeatures
+        )
+        popupController = controller
+        controller.show { [weak self] in self?.popupController = nil }
+        return controller.webView
     }
 
     /// Handle <input type="file"> elements by presenting the native file picker.
