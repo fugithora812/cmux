@@ -155,7 +155,7 @@ struct cmuxApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(updateViewModel: appDelegate.updateViewModel, windowId: primaryWindowId)
+            ContentView(windowId: primaryWindowId)
                 .environmentObject(tabManager)
                 .environmentObject(notificationStore)
                 .environmentObject(sidebarState)

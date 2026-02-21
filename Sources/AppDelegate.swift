@@ -3,6 +3,34 @@ import SwiftUI
 import Bonsplit
 import CoreServices
 import UserNotifications
+
+/// Minimal focus-debug log store used by GhosttyTerminalView, Workspace, and AppDelegate.
+final class FocusLogStore {
+    static let shared = FocusLogStore()
+
+    private var entries: [String] = []
+    private let lock = NSLock()
+    private let maxEntries = 500
+
+    func append(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        if entries.count >= maxEntries {
+            entries.removeFirst()
+        }
+        entries.append("[\(ISO8601DateFormatter().string(from: Date()))] \(message)")
+    }
+
+    func snapshot() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.joined(separator: "\n")
+    }
+
+    func logPath() -> String {
+        "/tmp/cmux-focus.log"
+    }
+}
 import WebKit
 import Combine
 import ObjectiveC.runtime

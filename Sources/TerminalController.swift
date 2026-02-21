@@ -1004,7 +1004,7 @@ class TerminalController {
         case "browser.snapshot":
             return v2Result(id: id, self.v2BrowserSnapshot(params: params))
         case "browser.eval":
-            return v2Result(id: id, .failure(.init(code: -1, message: "browser.eval is disabled in this build")))
+            return v2Result(id: id, .err(code: "disabled", message: "browser.eval is disabled in this build", data: nil))
         case "browser.wait":
             return v2Result(id: id, self.v2BrowserWait(params: params))
         case "browser.click":

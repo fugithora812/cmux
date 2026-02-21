@@ -25,6 +25,29 @@ struct NotificationInfo {
     let body: String
 }
 
+enum CLIIDFormat: String {
+    case refs
+    case uuids
+    case both
+
+    static func parse(_ raw: String?) throws -> CLIIDFormat? {
+        guard let raw else { return nil }
+        guard let parsed = CLIIDFormat(rawValue: raw.lowercased()) else {
+            throw CLIError(message: "--id-format must be one of: refs, uuids, both")
+        }
+        return parsed
+    }
+}
+
+final class SocketClient {
+    private let path: String
+    private var socketFD: Int32 = -1
+    private static let defaultResponseTimeoutSeconds: TimeInterval = 15.0
+    private static let responseTimeoutSeconds: TimeInterval = {
+        let env = ProcessInfo.processInfo.environment
+        if let raw = env["CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC"],
+           let seconds = Double(raw),
+           seconds > 0 {
             return seconds
         }
         return defaultResponseTimeoutSeconds
