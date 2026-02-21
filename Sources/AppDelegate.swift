@@ -3,7 +3,34 @@ import SwiftUI
 import Bonsplit
 import CoreServices
 import UserNotifications
-import Sentry
+
+/// Minimal focus-debug log store used by GhosttyTerminalView, Workspace, and AppDelegate.
+final class FocusLogStore {
+    static let shared = FocusLogStore()
+
+    private var entries: [String] = []
+    private let lock = NSLock()
+    private let maxEntries = 500
+
+    func append(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        if entries.count >= maxEntries {
+            entries.removeFirst()
+        }
+        entries.append("[\(ISO8601DateFormatter().string(from: Date()))] \(message)")
+    }
+
+    func snapshot() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.joined(separator: "\n")
+    }
+
+    func logPath() -> String {
+        "/tmp/cmux-focus.log"
+    }
+}
 import WebKit
 import Combine
 import ObjectiveC.runtime
@@ -208,8 +235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var browserOmnibarRepeatDelta: Int = 0
     private var browserAddressBarFocusObserver: NSObjectProtocol?
     private var browserAddressBarBlurObserver: NSObjectProtocol?
-    private let updateController = UpdateController()
-    private lazy var titlebarAccessoryController = UpdateTitlebarAccessoryController(viewModel: updateViewModel)
+    private let titlebarAccessoryController = TitlebarNotificationAccessoryController()
     private let windowDecorationsController = WindowDecorationsController()
     private var menuBarExtraController: MenuBarExtraController?
     private static let serviceErrorNoPath = NSString(string: "Could not load any folder path from the clipboard.")
@@ -273,10 +299,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var mainWindowContexts: [ObjectIdentifier: MainWindowContext] = [:]
     private var mainWindowControllers: [MainWindowController] = []
 
-    var updateViewModel: UpdateViewModel {
-        updateController.viewModel
-    }
-
     override init() {
         super.init()
         Self.shared = self
@@ -301,21 +323,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 #endif
 
-        SentrySDK.start { options in
-            options.dsn = "https://ecba1ec90ecaee02a102fba931b6d2b3@o4507547940749312.ingest.us.sentry.io/4510796264636416"
-            #if DEBUG
-            options.environment = "development"
-            options.debug = true
-            #else
-            options.environment = "production"
-            options.debug = false
-            #endif
-            options.sendDefaultPii = true
-        }
-
-        if !isRunningUnderXCTest {
-            PostHogAnalytics.shared.startIfNeeded()
-        }
 
         // UI tests frequently time out waiting for the main window if we do heavyweight
         // LaunchServices registration / single-instance enforcement synchronously at startup.
@@ -334,8 +341,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if !isRunningUnderXCTest {
             configureUserNotifications()
             setupMenuBarExtra()
-            // Sparkle updater is started lazily on first manual check. This avoids any
-            // first-launch permission prompts and keeps cmux aligned with the update pill UI.
         }
         titlebarAccessoryController.start()
         windowDecorationsController.start()
@@ -348,25 +353,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         installShortcutDefaultsObserver()
         NSApp.servicesProvider = self
 #if DEBUG
-        UpdateTestSupport.applyIfNeeded(to: updateController.viewModel)
-        if env["CMUX_UI_TEST_MODE"] == "1" {
-            let trigger = env["CMUX_UI_TEST_TRIGGER_UPDATE_CHECK"] ?? "<nil>"
-            let feed = env["CMUX_UI_TEST_FEED_URL"] ?? "<nil>"
-            UpdateLogStore.shared.append("ui test env: trigger=\(trigger) feed=\(feed)")
-        }
-        if env["CMUX_UI_TEST_TRIGGER_UPDATE_CHECK"] == "1" {
-            UpdateLogStore.shared.append("ui test trigger update check detected")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-                guard let self else { return }
-                let windowIds = NSApp.windows.map { $0.identifier?.rawValue ?? "<nil>" }
-                UpdateLogStore.shared.append("ui test windows: count=\(NSApp.windows.count) ids=\(windowIds.joined(separator: ","))")
-                if UpdateTestSupport.performMockFeedCheckIfNeeded(on: self.updateController.viewModel) {
-                    return
-                }
-                self.checkForUpdates(nil)
-            }
-        }
-
         // In UI tests, `WindowGroup` occasionally fails to materialize a window quickly on the VM.
         // If there are no windows shortly after launch, force-create one so XCUITest can proceed.
         if isRunningUnderXCTest {
@@ -416,11 +402,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 #endif
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        let env = ProcessInfo.processInfo.environment
-        if !isRunningUnderXCTest(env) {
-            PostHogAnalytics.shared.trackDailyActive(reason: "didBecomeActive")
-        }
-
         guard let tabManager, let notificationStore else { return }
         guard let tabId = tabManager.selectedTabId else { return }
         let surfaceId = tabManager.focusedSurfaceId(for: tabId)
@@ -436,7 +417,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationWillTerminate(_ notification: Notification) {
         TerminalController.shared.stop()
         BrowserHistoryStore.shared.flushPendingSaves()
-        PostHogAnalytics.shared.flush()
         notificationStore?.clearAll()
     }
 
@@ -706,7 +686,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let sidebarSelectionState = SidebarSelectionState()
         let notificationStore = TerminalNotificationStore.shared
 
-        let root = ContentView(updateViewModel: updateViewModel, windowId: windowId)
+        let root = ContentView(windowId: windowId)
             .environmentObject(tabManager)
             .environmentObject(notificationStore)
             .environmentObject(sidebarState)
@@ -726,7 +706,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         window.contentView = NSHostingView(rootView: root)
 
         // Apply shared window styling.
-        attachUpdateAccessory(to: window)
+        attachTitlebarAccessory(to: window)
         applyWindowDecorations(to: window)
 
         // Keep a strong reference so the window isn't deallocated.
@@ -759,11 +739,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return windowId
     }
 
-    @objc func checkForUpdates(_ sender: Any?) {
-        updateViewModel.overrideState = nil
-        updateController.checkForUpdates()
-    }
-
     private func setupMenuBarExtra() {
         let store = TerminalNotificationStore.shared
         menuBarExtraController = MenuBarExtraController(
@@ -780,9 +755,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             },
             onJumpToLatestUnread: { [weak self] in
                 self?.jumpToLatestUnread()
-            },
-            onCheckForUpdates: { [weak self] in
-                self?.checkForUpdates(nil)
             },
             onOpenPreferences: { [weak self] in
                 self?.openPreferencesWindow()
@@ -827,45 +799,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    #if DEBUG
-    @objc func showUpdatePill(_ sender: Any?) {
-        updateViewModel.debugOverrideText = nil
-        updateViewModel.overrideState = .installing(.init(isAutoUpdate: true, retryTerminatingApplication: {}, dismiss: {}))
-    }
-
-    @objc func showUpdatePillLongNightly(_ sender: Any?) {
-        updateViewModel.debugOverrideText = "Update Available: 0.32.0-nightly+20260216.abc1234"
-        updateViewModel.overrideState = .notFound(.init(acknowledgement: {}))
-    }
-
-    @objc func showUpdatePillLoading(_ sender: Any?) {
-        updateViewModel.debugOverrideText = nil
-        updateViewModel.overrideState = .checking(.init(cancel: {}))
-    }
-
-    @objc func hideUpdatePill(_ sender: Any?) {
-        updateViewModel.debugOverrideText = nil
-        updateViewModel.overrideState = .idle
-    }
-
-    @objc func clearUpdatePillOverride(_ sender: Any?) {
-        updateViewModel.debugOverrideText = nil
-        updateViewModel.overrideState = nil
-    }
-#endif
-
-    @objc func copyUpdateLogs(_ sender: Any?) {
-        let logText = UpdateLogStore.shared.snapshot()
-        let payload: String
-        if logText.isEmpty {
-            payload = "No update logs captured.\nLog file: \(UpdateLogStore.shared.logPath())"
-        } else {
-            payload = logText + "\nLog file: \(UpdateLogStore.shared.logPath())"
-        }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(payload, forType: .string)
-    }
     @objc func copyFocusLogs(_ sender: Any?) {
         let logText = FocusLogStore.shared.snapshot()
         let payload: String
@@ -918,9 +851,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    @objc func triggerSentryTestCrash(_ sender: Any?) {
-        SentrySDK.crash()
-    }
 #endif
 
 #if DEBUG
@@ -1417,7 +1347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 #endif
 
-    func attachUpdateAccessory(to window: NSWindow) {
+    func attachTitlebarAccessory(to window: NSWindow) {
         titlebarAccessoryController.start()
         titlebarAccessoryController.attach(to: window)
     }
@@ -2466,7 +2396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        updateController.validateMenuItem(item)
+        return true
     }
 
 
@@ -2991,7 +2921,6 @@ final class MenuBarExtraController: NSObject, NSMenuDelegate {
     private let onShowNotifications: () -> Void
     private let onOpenNotification: (TerminalNotification) -> Void
     private let onJumpToLatestUnread: () -> Void
-    private let onCheckForUpdates: () -> Void
     private let onOpenPreferences: () -> Void
     private let onQuitApp: () -> Void
     private var notificationsCancellable: AnyCancellable?
@@ -3005,7 +2934,6 @@ final class MenuBarExtraController: NSObject, NSMenuDelegate {
     private let jumpToUnreadItem = NSMenuItem(title: "Jump to Latest Unread", action: nil, keyEquivalent: "")
     private let markAllReadItem = NSMenuItem(title: "Mark All Read", action: nil, keyEquivalent: "")
     private let clearAllItem = NSMenuItem(title: "Clear All", action: nil, keyEquivalent: "")
-    private let checkForUpdatesItem = NSMenuItem(title: "Check for Updates…", action: nil, keyEquivalent: "")
     private let preferencesItem = NSMenuItem(title: "Preferences…", action: nil, keyEquivalent: "")
     private let quitItem = NSMenuItem(title: "Quit cmux", action: nil, keyEquivalent: "")
 
@@ -3017,7 +2945,6 @@ final class MenuBarExtraController: NSObject, NSMenuDelegate {
         onShowNotifications: @escaping () -> Void,
         onOpenNotification: @escaping (TerminalNotification) -> Void,
         onJumpToLatestUnread: @escaping () -> Void,
-        onCheckForUpdates: @escaping () -> Void,
         onOpenPreferences: @escaping () -> Void,
         onQuitApp: @escaping () -> Void
     ) {
@@ -3025,7 +2952,6 @@ final class MenuBarExtraController: NSObject, NSMenuDelegate {
         self.onShowNotifications = onShowNotifications
         self.onOpenNotification = onOpenNotification
         self.onJumpToLatestUnread = onJumpToLatestUnread
-        self.onCheckForUpdates = onCheckForUpdates
         self.onOpenPreferences = onOpenPreferences
         self.onQuitApp = onQuitApp
         self.buildHintTitle = MenuBarBuildHintFormatter.menuTitle()
@@ -3083,10 +3009,6 @@ final class MenuBarExtraController: NSObject, NSMenuDelegate {
         menu.addItem(clearAllItem)
 
         menu.addItem(.separator())
-
-        checkForUpdatesItem.target = self
-        checkForUpdatesItem.action = #selector(checkForUpdatesAction)
-        menu.addItem(checkForUpdatesItem)
 
         preferencesItem.target = self
         preferencesItem.action = #selector(preferencesAction)
@@ -3186,10 +3108,6 @@ final class MenuBarExtraController: NSObject, NSMenuDelegate {
 
     @objc private func clearAllAction() {
         notificationStore.clearAll()
-    }
-
-    @objc private func checkForUpdatesAction() {
-        onCheckForUpdates()
     }
 
     @objc private func preferencesAction() {

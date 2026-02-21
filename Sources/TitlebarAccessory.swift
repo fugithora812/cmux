@@ -964,8 +964,7 @@ private struct NotificationPopoverRow: View {
     }
 }
 
-final class UpdateTitlebarAccessoryController {
-    private weak var updateViewModel: UpdateViewModel?
+final class TitlebarNotificationAccessoryController {
     private var didStart = false
     private let attachedWindows = NSHashTable<NSWindow>.weakObjects()
     private var observers: [NSObjectProtocol] = []
@@ -974,8 +973,7 @@ final class UpdateTitlebarAccessoryController {
     private let controlsIdentifier = NSUserInterfaceItemIdentifier("cmux.titlebarControls")
     private let controlsControllers = NSHashTable<TitlebarControlsAccessoryViewController>.weakObjects()
 
-    init(viewModel: UpdateViewModel) {
-        self.updateViewModel = viewModel
+    init() {
     }
 
     deinit {
@@ -1037,9 +1035,7 @@ final class UpdateTitlebarAccessoryController {
 #if DEBUG
                 let env = ProcessInfo.processInfo.environment
                 if env["CMUX_UI_TEST_MODE"] == "1" {
-                    let ids = NSApp.windows.map { $0.identifier?.rawValue ?? "<nil>" }
-                    let delayText = String(format: "%.2f", delay)
-                    UpdateLogStore.shared.append("startup window scan (delay=\(delayText)) count=\(NSApp.windows.count) ids=\(ids.joined(separator: ","))")
+                    // Debug logging removed (UpdateLogStore was part of Sparkle update system)
                 }
 #endif
             }
@@ -1085,11 +1081,7 @@ final class UpdateTitlebarAccessoryController {
         attachedWindows.add(window)
 
 #if DEBUG
-        let env = ProcessInfo.processInfo.environment
-        if env["CMUX_UI_TEST_MODE"] == "1" {
-            let ident = window.identifier?.rawValue ?? "<nil>"
-            UpdateLogStore.shared.append("attached titlebar accessories to window id=\(ident)")
-        }
+        // Debug logging removed (UpdateLogStore was part of Sparkle update system)
 #endif
     }
 

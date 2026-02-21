@@ -1,0 +1,43 @@
+name: Check ghostty submodule update
+on:
+  schedule:
+    - cron: '0 4 * * 1'  # Every Monday 4:00 UTC (after ghostty sync)
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Check for ghostty updates
+        run: |
+          cd ghostty
+          git fetch origin main
+          LOCAL=$(git rev-parse HEAD)
+          REMOTE=$(git rev-parse origin/main)
+          if [ "$LOCAL" != "$REMOTE" ]; then
+            echo "ghostty update available: $LOCAL -> $REMOTE"
+            echo "UPDATE_AVAILABLE=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Create submodule update PR
+        if: env.UPDATE_AVAILABLE == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH="update-ghostty-$(date +%Y%m%d)"
+          git checkout -b "$BRANCH"
+          cd ghostty && git checkout origin/main && cd ..
+          git add ghostty
+          git commit -m "chore: update ghostty submodule"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "Update ghostty submodule ($(date +%Y-%m-%d))" \
+            --body "ghostty submodule を最新に更新" \
+            --base main \
+            --head "$BRANCH"

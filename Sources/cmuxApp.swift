@@ -155,7 +155,7 @@ struct cmuxApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(updateViewModel: appDelegate.updateViewModel, windowId: primaryWindowId)
+            ContentView(windowId: primaryWindowId)
                 .environmentObject(tabManager)
                 .environmentObject(notificationStore)
                 .environmentObject(sidebarState)
@@ -163,7 +163,7 @@ struct cmuxApp: App {
                 .onAppear {
 #if DEBUG
                     if ProcessInfo.processInfo.environment["CMUX_UI_TEST_MODE"] == "1" {
-                        UpdateLogStore.shared.append("ui test: cmuxApp onAppear")
+                        // Debug logging removed (UpdateLogStore was part of Sparkle update system)
                     }
 #endif
                     // Start the Unix socket controller for programmatic access
@@ -203,40 +203,6 @@ struct cmuxApp: App {
                     GhosttyApp.shared.reloadConfiguration()
                 }
                 .keyboardShortcut(",", modifiers: [.command, .shift])
-                Divider()
-                Button("Check for Updates…") {
-                    appDelegate.checkForUpdates(nil)
-                }
-                InstallUpdateMenuItem(model: appDelegate.updateViewModel)
-            }
-
-#if DEBUG
-            CommandMenu("Update Pill") {
-                Button("Show Update Pill") {
-                    appDelegate.showUpdatePill(nil)
-                }
-                Button("Show Long Nightly Pill") {
-                    appDelegate.showUpdatePillLongNightly(nil)
-                }
-                Button("Show Loading State") {
-                    appDelegate.showUpdatePillLoading(nil)
-                }
-                Button("Hide Update Pill") {
-                    appDelegate.hideUpdatePill(nil)
-                }
-                Button("Automatic Update Pill") {
-                    appDelegate.clearUpdatePillOverride(nil)
-                }
-            }
-#endif
-
-            CommandMenu("Update Logs") {
-                Button("Copy Update Logs") {
-                    appDelegate.copyUpdateLogs(nil)
-                }
-                Button("Copy Focus Logs") {
-                    appDelegate.copyFocusLogs(nil)
-                }
             }
 
             CommandMenu("Notifications") {
@@ -327,11 +293,6 @@ struct cmuxApp: App {
                     }
                 }
 
-                Divider()
-
-                Button("Trigger Sentry Test Crash") {
-                    appDelegate.triggerSentryTestCrash(nil)
-                }
             }
 #endif
 
