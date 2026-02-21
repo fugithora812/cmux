@@ -796,7 +796,6 @@ func installFileDropOverlay(on window: NSWindow, tabManager: TabManager) {
 }
 
 struct ContentView: View {
-    @ObservedObject var updateViewModel: UpdateViewModel
     let windowId: UUID
     @EnvironmentObject var tabManager: TabManager
     @EnvironmentObject var notificationStore: TerminalNotificationStore
@@ -1070,7 +1069,6 @@ struct ContentView: View {
 
     private var sidebarView: some View {
         VerticalTabsSidebar(
-            updateViewModel: updateViewModel,
             selection: $sidebarSelectionState.selection,
             selectedTabIds: $selectedTabIds,
             lastSidebarSelectionIndex: $lastSidebarSelectionIndex
@@ -1493,7 +1491,7 @@ struct ContentView: View {
             }
 #if DEBUG
             if ProcessInfo.processInfo.environment["CMUX_UI_TEST_MODE"] == "1" {
-                UpdateLogStore.shared.append("ui test window accessor: id=\(windowIdentifier) visible=\(window.isVisible)")
+                // Debug logging removed (UpdateLogStore was part of Sparkle update system)
             }
 #endif
             // Background glass: skip on macOS 26+ where NSGlassEffectView can cause blank
@@ -1709,7 +1707,6 @@ private struct SidebarResizerAccessibilityModifier: ViewModifier {
 }
 
 struct VerticalTabsSidebar: View {
-    @ObservedObject var updateViewModel: UpdateViewModel
     @EnvironmentObject var tabManager: TabManager
     @Binding var selection: SidebarSelection
     @Binding var selectedTabIds: Set<UUID>
@@ -1783,15 +1780,6 @@ struct VerticalTabsSidebar: View {
                 .background(Color.clear)
                 .modifier(ClearScrollBackground())
             }
-#if DEBUG
-            SidebarDevFooter(updateViewModel: updateViewModel)
-                .frame(maxWidth: .infinity, alignment: .leading)
-#else
-            UpdatePill(model: updateViewModel)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-#endif
         }
         .accessibilityIdentifier("Sidebar")
         .ignoresSafeArea()
@@ -2291,22 +2279,6 @@ private final class SidebarCommandKeyMonitor: ObservableObject {
     }
 }
 
-#if DEBUG
-private struct SidebarDevFooter: View {
-    @ObservedObject var updateViewModel: UpdateViewModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            UpdatePill(model: updateViewModel)
-            Text("THIS IS A DEV BUILD")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.red)
-        }
-        .padding(.horizontal, 10)
-        .padding(.bottom, 10)
-    }
-}
-#endif
 
 private struct SidebarTopScrim: View {
     let height: CGFloat
