@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# cmux claude wrapper - injects hooks and session tracking
+# cmux claude wrapper - injects session tracking
 #
 # When running inside a cmux terminal (CMUX_SURFACE_ID is set), this wrapper
-# intercepts `claude` invocations to inject --session-id and --settings flags
-# so that Claude Code hooks fire back into cmux for notifications/status.
+# intercepts `claude` invocations to inject --session-id for session management.
 # Outside cmux, it passes through to the real claude binary unchanged.
 
 # Find the real claude binary, skipping our own directory.
@@ -48,13 +47,9 @@ for arg in "$@"; do
     esac
 done
 
-# Build hooks settings JSON.
-# Claude Code merges --settings additively with the user's own settings.json.
-HOOKS_JSON='{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"cmux claude-hook session-start","timeout":10}]}],"Stop":[{"matcher":"","hooks":[{"type":"command","command":"cmux claude-hook stop","timeout":10}]}],"Notification":[{"matcher":"","hooks":[{"type":"command","command":"cmux claude-hook notification","timeout":10}]}]}}'
-
 if [[ "$SKIP_SESSION_ID" == true ]]; then
-    exec "$REAL_CLAUDE" --settings "$HOOKS_JSON" "$@"
+    exec "$REAL_CLAUDE" "$@"
 else
     SESSION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-    exec "$REAL_CLAUDE" --session-id "$SESSION_ID" --settings "$HOOKS_JSON" "$@"
+    exec "$REAL_CLAUDE" --session-id "$SESSION_ID" "$@"
 fi
