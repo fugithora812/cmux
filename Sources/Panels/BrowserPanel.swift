@@ -1138,6 +1138,10 @@ final class BrowserPanel: Panel, ObservableObject {
         // This reduces repeated consent/bot-challenge flows on sites like Google.
         config.websiteDataStore = .default()
 
+        // Disable automatic HTTP→HTTPS upgrade so localhost and other local
+        // dev servers are not blocked by WebKit's known-host upgrade logic.
+        config.upgradeKnownHostsToHTTPS = false
+
         // Enable developer extras (DevTools)
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
 
@@ -2319,12 +2323,16 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
     /// The URL of the last navigation that was attempted. Used to preserve the omnibar URL
     /// when a provisional navigation fails (e.g. connection refused on localhost:3000).
     var lastAttemptedURL: URL?
+    /// Retry counter for localhost scheme-redirect errors to prevent infinite loops.
+    private var localhostRetryCount = 0
+    private let maxLocalhostRetries = 1
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         lastAttemptedURL = webView.url
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        localhostRetryCount = 0
         didFinish?(webView)
     }
 
@@ -2334,8 +2342,9 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         let nsError = error as NSError
-        NSLog("BrowserPanel provisional navigation failed: domain=%@ code=%d desc=%@",
-              nsError.domain, nsError.code, error.localizedDescription)
+        let failingURLStr = (nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String) ?? "nil"
+        NSLog("BrowserPanel provisional navigation failed: domain=%@ code=%d failingURL=%@ desc=%@",
+              nsError.domain, nsError.code, failingURLStr, error.localizedDescription)
 
         // Cancelled navigations (e.g. rapid typing) are not real errors.
         if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
@@ -2347,6 +2356,42 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
         // This is expected and should not show an error page.
         if nsError.domain == "WebKitErrorDomain", nsError.code == 102 {
             return
+        }
+
+        // WebKitErrorRedirectToURLWithNonHTTPScheme (code 302) on localhost —
+        // macOS 26 WebKit raises this for local HTTP even when no redirect occurs.
+        // Suppress the error page for loopback addresses only.
+        // The failing URL in userInfo may be the redirect *target* (non-HTTP scheme),
+        // so also check lastAttemptedURL which holds the original navigation URL.
+        if nsError.domain == "WebKitErrorDomain", nsError.code == 302 {
+            let isLocalOrigin: Bool = {
+                // Check the original URL we tried to navigate to
+                if let origin = lastAttemptedURL,
+                   let host = origin.host?.lowercased(),
+                   host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" {
+                    return true
+                }
+                // Fallback: check the failing URL from the error
+                let failURL = nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String ?? ""
+                if let url = URL(string: failURL),
+                   let host = url.host?.lowercased(),
+                   host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" {
+                    return true
+                }
+                return false
+            }()
+            if isLocalOrigin {
+                NSLog("BrowserPanel: suppressing WebKit scheme-redirect error for local address (lastAttempted=%@, failingURL=%@)",
+                      lastAttemptedURL?.absoluteString ?? "nil",
+                      nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String ?? "nil")
+                // Retry loading the original URL once — the provisional navigation failed
+                // so the webview is blank; a single retry often succeeds.
+                if localhostRetryCount < maxLocalhostRetries, let retryURL = lastAttemptedURL {
+                    localhostRetryCount += 1
+                    webView.load(URLRequest(url: retryURL))
+                }
+                return
+            }
         }
 
         let failedURL = nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String
@@ -2443,6 +2488,17 @@ private class BrowserNavigationDelegate: NSObject, WKNavigationDelegate {
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
+        // Save the URL being navigated to, so didFailProvisionalNavigation can reference it
+        // even on the first navigation when webView.url is still nil.
+        // Only save HTTP(S) URLs — WebKit may internally redirect to non-HTTP schemes
+        // (e.g. "apphttp://") and we must not overwrite the original URL with those.
+        if let url = navigationAction.request.url,
+           navigationAction.targetFrame?.isMainFrame != false,
+           let scheme = url.scheme?.lowercased(),
+           scheme == "http" || scheme == "https" {
+            lastAttemptedURL = url
+        }
+
         if let url = navigationAction.request.url,
            navigationAction.targetFrame?.isMainFrame != false,
            shouldBlockInsecureHTTPNavigation?(url) == true {
